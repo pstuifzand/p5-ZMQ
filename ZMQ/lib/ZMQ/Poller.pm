@@ -7,6 +7,7 @@ sub new {
     my ($class) = @_;
     my $self = bless {
         items => [],
+        dirty => 0,
     }, $class;
     return $self;
 }
@@ -14,60 +15,76 @@ sub new {
 sub register {
     my ($self, $socket, $events) = @_;
     push @{$self->{items}}, { socket => $socket, events => $events };
+    $self->{dirty} = 1;
     return;
 }
 
 sub unregister {
     my ($self, $socket) = @_;
     @{$self->{items}} = grep { !($_->{socket} == $socket) } @{$self->{items}};
+    $self->{dirty} = 1;
     return;
 }
 
-sub _poll {
-    my ($self, $items, $timeout) = @_;
+sub _create_poll_items {
+    my $self = shift;
 
-    my @pollitems;
-    
-    my @fired = ((0) x scalar @$items);
-    my $i = 0;
+    if ($self->{dirty}) {
+        $self->{pollitems} = [];
 
-    for (@$items) {
-        my $callback = (sub { my $n = shift; return sub { $fired[$n] = 1; }; })->($i);
+        my @fired      = ((0) x scalar @{$self->{items}});
+        $self->{fired} = \@fired;
 
-        if (ref($_->{socket}) eq 'ZMQ::Socket') {
-            push @pollitems, { socket => $_->{socket}{_socket}, events => $_->{events}, callback => $callback };
+        my $i = 0;
+
+        for (@{$self->{items}}) {
+
+            my $callback = (sub { my ($fired, $n) = @_; return sub { $fired->[$n] = 1; }; })->($self->{fired}, $i);
+
+            if (ref($_->{socket}) eq 'ZMQ::Socket') {
+                push @{$self->{pollitems}}, { socket => $_->{socket}{_socket}, events => $_->{events}, callback => $callback };
+            }
+            elsif (ref($_->{socket}) eq 'ZMQ::LibZMQ2::Socket') {
+                push @{$self->{pollitems}}, { socket => $_->{socket}, events => $_->{events}, callback => $callback };
+            }
+            elsif (ref($_->{socket}) eq 'ZMQ::LibZMQ3::Socket') {
+                push @{$self->{pollitems}}, { socket => $_->{socket}, events => $_->{events}, callback => $callback };
+            }
+            elsif ($_->{socket} =~ m/^\d+$/) {
+                push @{$self->{pollitems}}, { fd => int($_->{socket}), events => $_->{events}, callback => $callback };
+            }
+            else {
+                die "Unknown type of socket";
+            }
         }
-        elsif (ref($_->{socket}) eq 'ZMQ::LibZMQ2::Socket') {
-            push @pollitems, { socket => $_->{socket}, events => $_->{events}, callback => sub { my $n = $i; $fired[$n] = 1; } };
-        }
-        elsif (ref($_->{socket}) eq 'ZMQ::LibZMQ3::Socket') {
-            push @pollitems, { socket => $_->{socket}, events => $_->{events}, callback => sub { my $n = $i; $fired[$n] = 1;} };
-        }
-        elsif ($_->{socket} =~ m/^\d+$/) {
-            push @pollitems, { fd => int($_->{socket}), events => $_->{events}, callback => sub { my $n = $i; $fired[$n] = 1;} };
-        }
-        else {
-            die "Unknown type of socket";
-        }
+        continue { $i++; };
+
+        $self->{dirty} = 0;
     }
-    continue { $i++; };
+    for (@{$self->{fired}}) {
+        $_ = 0;
+    }
+    return;
+}
+
+sub poll {
+    my ($self, $timeout) = @_;
+
+    $self->_create_poll_items();
+
+    my @pollitems = @{$self->{pollitems}};
 
     my @rv = ZMQ::call('zmq_poll', \@pollitems, $timeout);
 
     my @res;
 
     my $c = 0;
-    for (@fired) {
-        push @res, $items->[$c] if $fired[$c];
+    for (@{$self->{fired}}) {
+        push @res, $self->{items}->[$c] if $self->{fired}[$c];
     }
     continue { $c++; }
 
     return @res;
-}
-
-sub poll {
-    my ($self, $timeout) = @_;
-    return $self->_poll($self->{items}, $timeout);
 }
 
 1;
