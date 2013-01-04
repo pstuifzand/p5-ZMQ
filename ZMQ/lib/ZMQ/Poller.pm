@@ -7,7 +7,7 @@ sub new {
     my ($class) = @_;
     my $self = bless {
         items => [],
-        dirty => 0,
+        dirty => 1,
     }, $class;
     return $self;
 }
